@@ -1916,7 +1916,9 @@ real:: te,diffLx,diffLy,diffRx,diffRy, &
    diffCx,diffCy,diff2x,diff2y,grad,rr, &
    ros_base,ros_wind,ros_slope,ros_back,scale,nvx,nvy, &
    speed, &
-   sxm,sxp,sym,syp,spd_w,phi_w,tan_s,phi_s,r0_ms,vwx,vwy,vsx,vsy,adv_w,adv_s
+   sxm,sxp,sym,syp,spd_w,phi_w,tan_s,phi_s,r0_ms,vwx,vwy,vsx,vsy,adv_w,adv_s, &
+   pcx,pcy,lfx,lfy,hc,qx,qy,qn,cx,cy
+integer::m_lf
 integer::i,j,itso,iteo,jtso,jteo
 character(len=128)msg
 
@@ -2063,9 +2065,10 @@ threshold_AV=fire_viscosity_ngp*dx
                 ! normal direction backing rate only
                 te = - ros_base*grad
 
-                if(fire_upwind_split.eq.1)then
+                if(fire_upwind_split.eq.1 .or. fire_upwind_split.eq.2)then
 
-                    ! split Hamiltonian, as ERF (directional_split_hamiltonian):
+                    ! fire_upwind_split=1: split Hamiltonian, as ERF (directional_split_hamiltonian):
+                    ! fire_upwind_split=2: the same Hamiltonian with local Lax-Friedrichs, see below.
                     !   phi_t = -R0*|grad phi| - max(Vw.grad phi,0) - max(Vs.grad phi,0)
                     ! Vw = R0*phi_w(|U|) U/|U|, Vs = R0*phi_s(|grad z|) grad z/|grad z|, with phi_w and phi_s the
                     ! Rothermel wind and slope factors of fire_ros. Unlike ros_wind/speed and ros_slope/tanphi, these
@@ -2100,12 +2103,33 @@ threshold_AV=fire_viscosity_ngp*dx
                     if (vwy.gt.0.) then; adv_w=adv_w+vwy*sym; else; adv_w=adv_w+vwy*syp; endif
                     if (vsx.gt.0.) then; adv_s=vsx*sxm; else; adv_s=vsx*sxp; endif
                     if (vsy.gt.0.) then; adv_s=adv_s+vsy*sym; else; adv_s=adv_s+vsy*syp; endif
-                    te = te - max(adv_w,0.) - max(adv_s,0.)
-
-                elseif(fire_upwind_split.eq.2)then   
- 
-                    ! Lax-Friedrichs
-                    call crash('prop_ls: bad fire_upwind_split, Lax-Friedrichs not done yet')
+                    if (fire_upwind_split.eq.1) then
+                        te = te - max(adv_w,0.) - max(adv_s,0.)
+                    else
+                        ! Local Lax-Friedrichs (Osher and Shu 1991; Jiang and Peng 2000, eq. 2.17) for the whole Hamiltonian
+                        !   H(p) = R0|p| + max(Vw.p,0) + max(Vs.p,0):
+                        !   te = -H(pc) + (lfx*(sxp-sxm) + lfy*(syp-sym))/2,  pc = central average of the one-sided derivatives,
+                        ! lfx, lfy = max |dH/dp_x|, |dH/dp_y| over the corners and centre of the box [sxm,sxp] x [sym,syp].
+                        ! Central evaluation plus dissipation everywhere, no side selection and no fire_upwinding term.
+                        pcx=0.5*(sxm+sxp); pcy=0.5*(sym+syp)
+                        lfx=0.; lfy=0.
+                        do m_lf=1,5
+                            select case(m_lf)
+                            case(1); qx=sxm; qy=sym
+                            case(2); qx=sxp; qy=sym
+                            case(3); qx=sxm; qy=syp
+                            case(4); qx=sxp; qy=syp
+                            case default; qx=pcx; qy=pcy
+                            end select
+                            qn=sqrt(qx*qx+qy*qy)+tiny(qn)
+                            cx=r0_ms*qx/qn; cy=r0_ms*qy/qn
+                            if (vwx*qx+vwy*qy.gt.0.) then; cx=cx+vwx; cy=cy+vwy; endif
+                            if (vsx*qx+vsy*qy.gt.0.) then; cx=cx+vsx; cy=cy+vsy; endif
+                            lfx=max(lfx,abs(cx)); lfy=max(lfy,abs(cy))
+                        enddo
+                        hc=r0_ms*sqrt(pcx*pcx+pcy*pcy)+max(vwx*pcx+vwy*pcy,0.)+max(vsx*pcx+vsy*pcy,0.)
+                        te = -hc + 0.5*lfx*(sxp-sxm) + 0.5*lfy*(syp-sym)
+                    endif
 
                 else
 
